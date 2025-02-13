@@ -44,7 +44,6 @@ street_replacement = {
     " Lane" : " Ln",
     " Motorway" : " Mtwy",
     " Overpass" : " Opas",
-    " Park" : " Park",
     " Parkway" : " Pkwy",
     " Place" : " Pl",
     " Plaza" : " Plz",
@@ -56,7 +55,6 @@ street_replacement = {
     " Street" : " St",
     " Terrace" : " Ter",
     " Trail" : " Trl",
-    " Way" : " Way",
     " " : ""
 }
 
@@ -80,7 +78,7 @@ print("Creating SQLite DB in memory")
 con = sqlite3.connect(':memory:')
 cur = con.cursor()
 cur.execute("CREATE TABLE hd (usid, callsign, status, service)")
-cur.execute("CREATE TABLE en (usid, name, street, street_norm, city, state, zip, frn)")
+cur.execute("CREATE TABLE en (usid, name, street, street_norm, city, state, zip, frn, appl_type)")
 cur.execute("CREATE TABLE am (usid, class, prevcall)")
 
 csv.register_dialect('piper', delimiter='|', quoting=csv.QUOTE_NONE)
@@ -110,7 +108,7 @@ with open(gmrs_EN, "r") as csvfile:
             street = street.title()
             for full, abbr in street_replacement.items():
                 street_norm = street.replace(full, abbr)
-            cur.execute("INSERT INTO en VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (row[1], row[7], street, street_norm, row[16].title(), row[17].upper(), row[18][:5], row[22]))
+            cur.execute("INSERT INTO en VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (row[1], row[7], street, street_norm, row[16].title(), row[17].upper(), row[18][:5], row[22], row[23]))
             good_lines += 1
         else:
             bad_lines += 1
@@ -141,7 +139,7 @@ with open(amat_EN, "r") as csvfile:
             street = street.title()
             for full, abbr in street_replacement.items():
                 street_norm = street.replace(full, abbr)
-            cur.execute("INSERT INTO en VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (row[1], row[7], street, street_norm, row[16].title(), row[17].upper(), row[18][:5], row[22]))
+            cur.execute("INSERT INTO en VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (row[1], row[7], street, street_norm, row[16].title(), row[17].upper(), row[18][:5], row[22], row[23]))
             good_lines += 1
         else:
             bad_lines += 1
@@ -162,7 +160,8 @@ print("    " + str(good_lines) + " / " + str(bad_lines))
 print("Exporting data from SQLite in memory to", DB_filepath)
 con.execute("ATTACH DATABASE '" + DB_filepath + "' AS clean;").fetchall()
 print("  Inserting table into", DB_filepath)
-con.execute("CREATE TABLE clean.licenses AS SELECT hd.usid,callsign,status,service,name,street,street_norm,city,state,zip,frn,class,prevcall FROM hd INNER JOIN en ON hd.usid = en.usid LEFT JOIN am ON hd.usid = am.usid;").fetchall()
+con.execute("CREATE TABLE clean.licenses AS SELECT hd.usid,callsign,status,service,name,street,street_norm,city,state,zip,frn,appl_type,class,prevcall FROM hd INNER JOIN en ON hd.usid = en.usid LEFT JOIN am ON hd.usid = am.usid;").fetchall()
+con.execute("DELETE FROM clean.licenses WHERE appl_type != 'I';").fetchall()
 print("  Cleaning up")
 con.execute("COMMIT;").fetchall()
 con.execute("DETACH clean;").fetchall()
@@ -187,36 +186,61 @@ con.execute("vacuum;").fetchall()
 print("Exporting amateur/GMRS matches to CSV")
 csv_file_path = 'amat_gmrs_matches.csv'
 
-# FRN matches
-print("  Fetching FRN matches")
+# Get hams
+print("  Getting hams")
+con.row_factory = sqlite3.Row
 cur = con.cursor()
-cur.execute("""
-select licenses.*,gmrs_licenses.callsign,'FRN' as match_type from licenses
-join licenses as gmrs_licenses
-where licenses.service in ('HA','HV') and gmrs_licenses.service = 'ZA'
-and licenses.frn = gmrs_licenses.frn;
-""")
-frn_rows = cur.fetchall()
+cur.execute("select * from licenses where service in ('HA','HV');")
+amat_rows = cur.fetchall()
+results = []
+for row in amat_rows:
+    if row['frn'] != '':
+        gmrs_rec = con.execute("SELECT * FROM licenses WHERE service = 'ZA' AND frn = ?", (row['frn'],)).fetchall()
+    if len(gmrs_rec) > 2:
+        print(row['callsign'], "has more than one GMRS record at FRN", row['frn'])
+    elif len(gmrs_rec) == 1:
+        # Export row to CSV with GMRS callsign and match type = FRN
+        result = dict(row)
+        result['gmrs_callsign'] = gmrs_rec[0]['callsign']
+        result['match_type'] = 'FRN'
+        results.append(result)
+    else:
+        gmrs_rec = con.execute("SELECT * FROM licenses WHERE service = 'ZA' AND street_norm = ? AND city = ? AND state = ?", (row['street_norm'], row['city'], row['state'])).fetchall()
+        if len(gmrs_rec) > 2:
+            print(row['callsign'], "has more than one GMRS record at address", row['street_norm'], row['city'], row['state'])
+        elif len(gmrs_rec) == 1:
+            # Export row to CSV with GMRS callsign and match type = Address
+            result = dict(row)
+            result['gmrs_callsign'] = gmrs_rec[0]['callsign']
+            result['match_type'] = 'Address'
+            results.append(result)
 
-# Fuzzy address matches
-print("  Fetching fuzzy address matches")
-cur = con.cursor()
-cur.execute("""
-select licenses.*,gmrs_licenses.callsign,'Address' as match_type from licenses
-join licenses as gmrs_licenses
-where licenses.service in ('HA','HV') and gmrs_licenses.service = 'ZA'
-and licenses.frn <> gmrs_licenses.frn and licenses.street_norm = gmrs_licenses.street_norm
-and licenses.city = gmrs_licenses.city and licenses.state = gmrs_licenses.state;
-""")
-addr_rows = cur.fetchall()
 
 # Writing CSV file
 print("  Writing CSV file")
 with open(csv_file_path, 'w', newline='') as csvfile:
+    fieldnames = results[0].keys()
+    csvwriter = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    csvwriter.writeheader()
+    csvwriter.writerows(results)
+
+
+# Write all amateur and GMRS records to CSV
+cur = con.cursor()
+cur.execute("select * from licenses where service in ('HA','HV');")
+amat_all = cur.fetchall()
+with open('amat_all.csv', 'w', newline='') as csvfile:
     csvwriter = csv.writer(csvfile)
     csvwriter.writerow([desc[0] for desc in cur.description])
-    csvwriter.writerows(frn_rows)
-    csvwriter.writerows(addr_rows)
+    csvwriter.writerows(amat_all)
+
+cur = con.cursor()
+cur.execute("select * from licenses where service in ('ZA');")
+gmrs_all = cur.fetchall()
+with open('gmrs_all.csv', 'w', newline='') as csvfile:
+    csvwriter = csv.writer(csvfile)
+    csvwriter.writerow([desc[0] for desc in cur.description])
+    csvwriter.writerows(gmrs_all)
 
 
 print("Cleaning up")
