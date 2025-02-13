@@ -44,7 +44,6 @@ street_replacement = {
     " Lane" : " Ln",
     " Motorway" : " Mtwy",
     " Overpass" : " Opas",
-    " Park" : " Park",
     " Parkway" : " Pkwy",
     " Place" : " Pl",
     " Plaza" : " Plz",
@@ -56,7 +55,6 @@ street_replacement = {
     " Street" : " St",
     " Terrace" : " Ter",
     " Trail" : " Trl",
-    " Way" : " Way",
     " " : ""
 }
 
